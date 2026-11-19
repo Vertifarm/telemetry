@@ -1,0 +1,87 @@
+name: Validation PR (Branches & Conventional Commits)
+
+on:
+  pull_request:
+    branches:
+      - develop
+      - main
+
+jobs:
+  validate-branch-and-commits:
+    name: Règles de branche & Commits
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout complet de l'historique Git
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 1. Vérifier le nom de la branche et la cible
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          echo "Branche source : $HEAD_REF -> Cible : $BASE_REF"
+
+          # Autorise release/* et hotfix/* uniquement vers main
+          if [[ "$BASE_REF" == "main" ]]; then
+            if [[ ! "$HEAD_REF" =~ ^(release|hotfix)/[a-z0-9._-]+$ ]]; then
+              echo "❌ Erreur : vers 'main', seules les branches 'release/*' ou 'hotfix/*' sont autorisées."
+              exit 1
+            fi
+          fi
+
+          # Exige feat/*, fix/*, docs/* ou chore/* vers develop
+          if [[ "$BASE_REF" == "develop" ]]; then
+            if [[ ! "$HEAD_REF" =~ ^(feat|fix|docs|chore)/[a-z0-9._-]+$ ]]; then
+              echo "❌ Erreur : la branche '$HEAD_REF' doit commencer par feat/, fix/, docs/ ou chore/ (en minuscules, sans espaces)."
+              exit 1
+            fi
+          fi
+
+          echo "✅ Nom de branche valide."
+
+      - name: 2. Vérifier que la branche est à jour avec develop
+        if: github.base_ref == 'develop'
+        run: |
+          git fetch origin develop
+          # Vérifie si origin/develop est un ancêtre direct de la branche de la PR
+          if ! git merge-base --is-ancestor origin/develop HEAD; then
+            echo "❌ Erreur : votre branche n'est pas à jour avec 'develop'."
+            echo "👉 Exécutez : git fetch origin && git rebase origin/develop (ou git merge origin/develop)"
+            exit 1
+          fi
+          echo "✅ Branche à jour avec develop."
+
+      - name: 3. Vérifier le format des messages de commit
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Types autorisés : feat, fix, docs, chore (avec scope optionnel ex: feat(api): ...)
+          REGEX="^(feat|fix|docs|chore)(\([a-z0-9._-]+\))?!?: .+"
+          INVALID=0
+
+          # Parcourt tous les commits introduits par la PR
+          while IFS= read -r COMMIT_HASH; do
+            SUBJECT=$(git log -n 1 --pretty=format:%s "$COMMIT_HASH")
+            
+            # Ignore les commits de merge automatiques de GitHub
+            if [[ "$SUBJECT" =~ ^Merge\ (branch|pull\ request) ]]; then
+              continue
+            fi
+
+            if [[ ! "$SUBJECT" =~ $REGEX ]]; then
+              echo "❌ Commit invalide ($COMMIT_HASH) : \"$SUBJECT\""
+              INVALID=1
+            else
+              echo "✅ Commit valide : \"$SUBJECT\""
+            fi
+          done < <(git rev-list "${BASE_SHA}..${HEAD_SHA}")
+
+          if [[ "$INVALID" -ne 0 ]]; then
+            echo ""
+            echo "💡 Format attendu : <type>: <description> (ex: docs: ajoute la section équipe au README)"
+            echo "   Types autorisés : feat, fix, docs, chore"
+            exit 1
+          fi
